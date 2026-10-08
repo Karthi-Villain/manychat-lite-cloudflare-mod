@@ -2,6 +2,7 @@
   "name": "manychat-lite-cloudflare",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit && wrangler deploy --dry-run",

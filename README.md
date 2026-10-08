@@ -602,3 +602,7 @@ npx wrangler d1 execute manychat-lite-cloudflare --remote --command "SELECT labe
 - `tests/` - Node and workerd tests
 - `wrangler.jsonc` - Cloudflare Worker config and the daily cron
 - `.dev.vars.example` - local development placeholders
+
+## License
+
+[MIT](LICENSE)

@@ -24,28 +24,46 @@ The starter defaults to `DRY_RUN=true` (test mode): matches are recorded as test
 
 ## Features
 
-- Keyword rules for comments: one Meta Private Reply DM per comment, with an optional link button
-- Optional public comment replies; put several on separate lines and each comment gets one of them
-- Comment deduping, and your own comments (by account ID or `OWNER_IG_USERNAME`) never trigger a rule
-- Retries for failed sends; retrying a failed public reply only resends the public comment
-- Instagram token auto-renewal: daily connection check, renewal before the 60-day expiry, AES-GCM encrypted storage in D1
+- **Post-Specific Automations**: Target all posts or a specific post/reel (by Instagram Media ID or Post URL), exactly like market tools (ManyChat).
+- **Interactive Scrollable Post Browser**: Browse recent Instagram posts directly inside the automation form with numbered badges (`#1`, `#2`, ...), post thumbnails, captions, media type badges (`REEL`, `POST`, `CAROUSEL`), real-time search filtering, and one-click selection.
+- **Flexible Comment Trigger Modes**:
+  - **Contains keywords**: matches when the comment contains any of the keywords.
+  - **Exact word/phrase**: comment must match the exact word (e.g. `PROMPT`), ignoring punctuation and casing.
+  - **Any comment**: any comment on that post triggers the custom reply designed for that particular post.
+- **3-Second Profile Redirect Waiting Page**:
+  - Interstitial waiting page (`/r/:id`) before opening destination links in DM buttons.
+  - Displays creator Instagram profile picture with an animated rotating gradient ring, custom quotation or announcement, author signature, and ambient blurred background aura.
+  - Millisecond-accurate SVG circular countdown timer powered by `requestAnimationFrame` with `<noscript>` fallback.
+  - Configurable countdown seconds, headline, quote, and avatar directly from the dashboard Link Bridge settings.
+- **DM Image Attachments with Compressed WebP D1 Storage**:
+  - Attach images directly to automated DM replies.
+  - Client-side `<canvas>` WebP compression for zero external storage dependencies; raw WebP data is stored directly in Cloudflare D1 and served via `/assets/:id.webp`.
+  - Dispatched via Meta Graph API Generic Template cards with preview images, private text, and action buttons.
+- **Rule Priority**: Rules targeting a specific post take priority over global rules, and exact/keyword matches take priority over any-comment catch-alls.
+- Keyword rules for comments: one Meta Private Reply DM per comment, with an optional link button.
+- Optional public comment replies; put several on separate lines and each comment gets one of them.
+- Comment deduping, and your own comments (by account ID or `OWNER_IG_USERNAME`) never trigger a rule.
+- Retries for failed sends; retrying a failed public reply only resends the public comment.
+- Instagram token auto-renewal: daily connection check, renewal before the 60-day expiry, AES-GCM encrypted storage in D1.
 - DM tools:
-  - Conversation starters (up to four buttons in new chats), with separate Save and Publish steps
-  - Story replies by story ID, story or link-sticker URL, or keyword (up to 30 rules)
-  - Links to specific replies: `https://ig.me/<username>?ref=<reply>__<source>`
-  - Optional follower-status check with follower and non-follower opening lines
-  - Optional keyword replies to DMs
-  - Custom text replies for anything that is not a keyword rule
-- Password-protected admin dashboard: automations, live reply preview, DM tools, reply stats, comment and DM activity, connection status
-- Meta webhook verification and request signature validation; admin forms only accept same-origin posts
-- Cloudflare D1 migrations, Node and workerd test suites with mocked Meta requests
+  - Conversation starters (up to four buttons in new chats), with separate Save and Publish steps.
+  - Story replies by story ID, story or link-sticker URL, or keyword (up to 30 rules).
+  - Links to specific replies: `https://ig.me/<username>?ref=<reply>__<source>`.
+  - Optional follower-status check with follower and non-follower opening lines.
+  - Optional keyword replies to DMs.
+  - Custom text replies for anything that is not a keyword rule.
+- Password-protected admin dashboard: automations, live reply preview, Link bridge settings, DM tools, reply stats, comment and DM activity, connection status.
+- Meta webhook verification and request signature validation; admin forms only accept same-origin posts.
+- Meta App Review legal compliance: built-in `/privacy-policy`, `/terms`, and `/data-deletion` endpoints.
+- Cloudflare D1 migrations, Node and workerd test suites with mocked Meta requests.
 
 ## Dashboard
 
 The dashboard lives at `/admin` and is protected by `ADMIN_TOKEN`. The sections:
 
 - **Overview**: DMs sent, active automations, comments and DMs received, errors. In test mode the first tile counts test matches instead of deliveries.
-- **Automations**: keyword rules with a chat-style preview of the DM, link button and public reply.
+- **Automations**: keyword and post-specific rules with a chat-style preview of the DM, image attachment, link button and public reply.
+- **Link bridge**: customize your 3-second waiting page (avatar upload, headline, quote, author, countdown seconds) with a live preview link (`/r/preview`).
 - **DM tools**: conversation starters, follower status, DM keyword replies, custom replies, story replies and links to your DMs.
 - **Reply stats**: per rule and custom reply, comment matches and DM matches, DMs sent, errors and last delivery.
 - **Activity**: the latest 50 comments (filter by status, keyword, username, date) and the latest 30 DMs, including starter taps, story replies, story mentions and link opens.

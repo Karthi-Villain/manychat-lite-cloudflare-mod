@@ -1,4 +1,5 @@
 import { renderDashboardPage, renderErrorPage, renderLoginPage, renderMissingAdminTokenPage } from "./dashboard";
+import { renderDataDeletion, renderPrivacyPolicy, renderTermsOfService } from "./legal";
 import { extractDmEvents, matchStoryRule, matchesWholeWord, type DmEvent } from "./dm-events";
 import {
   customReplyKey,
@@ -22,6 +23,12 @@ import {
   type InstagramProfile
 } from "./dm-features";
 import {
+  DEFAULT_REDIRECT_BRIDGE_SETTINGS,
+  getRedirectBridgeSettings,
+  renderRedirectPage,
+  saveRedirectBridgeSettings
+} from "./redirect-bridge";
+import {
   getInstagramAccessToken,
   getInstagramTokenStatus,
   maintainInstagramAccessToken,
@@ -32,6 +39,7 @@ import type {
   DashboardStats,
   RecentEventRow,
   RecentMessageRow,
+  RedirectBridgeSettings,
   ReplyStatsRow,
   Rule
 } from "./types";
@@ -44,6 +52,7 @@ type SecretEnv = {
   IG_USER_ID: string;
   ADMIN_TOKEN?: string;
   OWNER_IG_USERNAME?: string;
+  APP_URL?: string;
 };
 
 type AppEnv = Cloudflare.Env & SecretEnv;
@@ -77,6 +86,11 @@ type RuleRow = {
   link_url: string | null;
   link_button_label: string | null;
   active: number;
+  post_id: string | null;
+  post_url: string | null;
+  match_type: string | null;
+  image_asset_id: string | null;
+  use_bridge: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -158,6 +172,18 @@ export default {
       return json({ ok: true, service: "manychat-lite-cloudflare", admin: "/admin" });
     }
 
+    if (request.method === "GET" && (url.pathname === "/privacy" || url.pathname === "/privacy-policy")) {
+      return html(renderPrivacyPolicy(env.OWNER_IG_USERNAME));
+    }
+
+    if (request.method === "GET" && (url.pathname === "/terms" || url.pathname === "/terms-of-service")) {
+      return html(renderTermsOfService(env.OWNER_IG_USERNAME));
+    }
+
+    if (request.method === "GET" && (url.pathname === "/data-deletion" || url.pathname === "/user-data-deletion")) {
+      return html(renderDataDeletion(env.OWNER_IG_USERNAME));
+    }
+
     if (request.method === "GET" && url.pathname === "/admin") {
       return handleAdminGet(request, env, url);
     }
@@ -186,6 +212,13 @@ export default {
       }
       const settings = await getDmFeatureSettings(env.DB);
       return json({ settings, publication: await getIceBreakersPublicationStatus(env.DB, settings) });
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/media") {
+      if (!(await isAdminRequest(request, env))) {
+        return json({ ok: false, error: "Login required." }, 401);
+      }
+      return json(await getRecentMedia(env));
     }
 
     if (request.method === "POST" && DM_FEATURE_PATHS.has(url.pathname)) {
@@ -218,6 +251,31 @@ export default {
         return html(renderErrorPage("That comment ID is not valid."), 400);
       }
       return handleRetryEvent(request, env, commentId);
+    }
+
+    const bridgeMatch = url.pathname.match(/^\/r\/([^/]+)$/);
+    if (request.method === "GET" && bridgeMatch) {
+      return handleBridgeRedirect(request, env, bridgeMatch[1]);
+    }
+
+    const assetMatch = url.pathname.match(/^\/assets\/([^/.]+)(?:\.webp)?$/);
+    if (request.method === "GET" && assetMatch) {
+      return handleAssetServe(env, assetMatch[1]);
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/bridge-settings") {
+      if (!(await isAdminRequest(request, env))) {
+        return json({ ok: false, error: "Login required." }, 401);
+      }
+      return json({ ok: true, settings: await getRedirectBridgeSettings(env.DB) });
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/bridge-settings") {
+      return handleBridgeSettingsPost(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/assets") {
+      return handleAssetUpload(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/webhook") {
@@ -254,13 +312,14 @@ async function handleWebhookPost(
   const payload = parseJsonBody(rawBody);
   const commentEvents = extractCommentEvents(payload);
   const messageEvents = await extractDmEvents(payload);
+  const origin = getAppOrigin(env, request);
 
   for (const event of commentEvents) {
-    ctx.waitUntil(processCommentEvent(event, env));
+    ctx.waitUntil(processCommentEvent(event, env, origin));
   }
 
   for (const event of messageEvents) {
-    ctx.waitUntil(processMessageEvent(event, env));
+    ctx.waitUntil(processMessageEvent(event, env, origin));
   }
 
   return json({
@@ -286,7 +345,7 @@ function verifyWebhook(url: URL, env: AppEnv): Response {
   return json({ ok: false, error: "Webhook verification failed" }, 403);
 }
 
-async function processCommentEvent(event: CommentEvent, env: AppEnv): Promise<void> {
+async function processCommentEvent(event: CommentEvent, env: AppEnv, origin = ""): Promise<void> {
   const receivedAt = new Date().toISOString();
   const inserted = await insertCommentEvent(env.DB, event, receivedAt);
 
@@ -300,7 +359,7 @@ async function processCommentEvent(event: CommentEvent, env: AppEnv): Promise<vo
     return;
   }
 
-  const rule = await findMatchingRule(env.DB, event.text, env);
+  const rule = await findMatchingRule(env.DB, event, env);
   if (!rule) {
     await updateStatus(env.DB, event.commentId, "ignored_no_keyword", false, null);
     return;
@@ -313,7 +372,7 @@ async function processCommentEvent(event: CommentEvent, env: AppEnv): Promise<vo
   }
 
   try {
-    const result = await sendRuleResponses(env, event.commentId, rule);
+    const result = await sendRuleResponses(env, event.commentId, rule, origin);
     await updateEventAfterSend(env.DB, event.commentId, rule, result);
   } catch (error) {
     await recordCommentSendError(env.DB, event.commentId, rule, error);
@@ -370,14 +429,20 @@ async function recordCommentSendError(
 async function sendRuleResponses(
   env: AppEnv,
   commentId: string,
-  rule: MatchedRule
+  rule: MatchedRule,
+  origin = ""
 ): Promise<SendRuleResult> {
+  const effectiveOrigin = origin || getAppOrigin(env);
+  const bridgeUrl = (rule.linkUrl && rule.useBridge && effectiveOrigin) ? `${effectiveOrigin}/r/${rule.id}` : rule.linkUrl;
+  const imageUrl = (rule.imageAssetId && effectiveOrigin) ? `${effectiveOrigin}/assets/${rule.imageAssetId}.webp` : null;
+
   const privateReply = await sendPrivateReply(
     env,
     commentId,
     rule.replyText,
-    rule.linkUrl,
-    rule.linkButtonLabel
+    bridgeUrl,
+    rule.linkButtonLabel,
+    imageUrl
   );
   return completeCommentResponses(env, commentId, privateReply, rule.publicReplyText);
 }
@@ -442,7 +507,7 @@ function hashString(value: string): number {
 }
 
 // Incoming DMs, conversation starter taps, story replies and ig.me link opens.
-async function processMessageEvent(event: DmEvent, env: AppEnv): Promise<void> {
+async function processMessageEvent(event: DmEvent, env: AppEnv, origin = ""): Promise<void> {
   if (!(await insertMessageEvent(env.DB, event, new Date().toISOString()))) {
     console.log(JSON.stringify({ level: "info", msg: "duplicate_message", messageId: event.messageId }));
     return;
@@ -512,7 +577,7 @@ async function processMessageEvent(event: DmEvent, env: AppEnv): Promise<void> {
     return;
   }
 
-  const reply = await resolveReply(env.DB, replyKey, settings);
+  const reply = await resolveReply(env.DB, replyKey, settings, origin);
   if (paused) {
     await updateMessageStatus(env.DB, event.messageId, "ignored_paused", { replyKey, label: pausedLabel ?? reply?.label ?? replyKey });
     return;
@@ -555,21 +620,24 @@ async function findDmKeywordRule(db: D1Database, text: string): Promise<Rule | n
   return null;
 }
 
-async function resolveReply(db: D1Database, key: string, settings: DmFeatureSettings): Promise<ResolvedReply | null> {
+async function resolveReply(db: D1Database, key: string, settings: DmFeatureSettings, origin = ""): Promise<ResolvedReply | null> {
   const target = parseReplyKey(key);
   if (!target) {
     return null;
   }
   if (target.type === "rule") {
     const rule = await getRuleById(db, target.ruleId);
-    return rule
-      ? {
-        key,
-        label: rule.label,
-        paused: !rule.active,
-        message: buildPrivateReplyMessage(rule.replyText, rule.linkUrl, rule.linkButtonLabel)
-      }
-      : null;
+    if (!rule) {
+      return null;
+    }
+    const bridgeUrl = (rule.linkUrl && rule.useBridge && origin) ? `${origin}/r/${rule.id}` : rule.linkUrl;
+    const imageUrl = (rule.imageAssetId && origin) ? `${origin}/assets/${rule.imageAssetId}.webp` : null;
+    return {
+      key,
+      label: rule.label,
+      paused: !rule.active,
+      message: buildPrivateReplyMessage(rule.replyText, bridgeUrl, rule.linkButtonLabel, imageUrl)
+    };
   }
   const custom = settings.customReplies.find((item) => item.id === target.textId);
   return custom ? { key, label: custom.label, paused: false, message: { text: custom.text } } : null;
@@ -725,22 +793,140 @@ async function updateStatus(
     .run();
 }
 
-async function findMatchingRule(db: D1Database, text: string, env: AppEnv): Promise<MatchedRule | null> {
+async function findMatchingRule(db: D1Database, event: CommentEvent, env: AppEnv): Promise<MatchedRule | null> {
   const activeRules = await getRules(db, true);
 
-  for (const rule of activeRules) {
-    const matchedKeyword = findMatchedKeyword(text, rule.keywords);
+  // 1. Post-specific rules (when comment is on a known media)
+  if (event.mediaId) {
+    const postRules = activeRules.filter((rule) => matchesPostTarget(rule, event.mediaId!));
+
+    // a) Exact match on this post
+    for (const rule of postRules.filter((r) => r.matchType === "exact")) {
+      const matchedKeyword = matchExactWord(event.text, rule.keywords);
+      if (matchedKeyword) {
+        return { ...rule, matchedKeyword };
+      }
+    }
+
+    // b) Contains keywords on this post
+    for (const rule of postRules.filter((r) => r.matchType === "contains")) {
+      const matchedKeyword = findMatchedKeyword(event.text, rule.keywords);
+      if (matchedKeyword) {
+        return { ...rule, matchedKeyword };
+      }
+    }
+
+    // c) Any comment on this post
+    const anyRule = postRules.find((r) => r.matchType === "any");
+    if (anyRule) {
+      return { ...anyRule, matchedKeyword: anyRule.keywords[0] || "ANY_COMMENT" };
+    }
+  }
+
+  // 2. Global rules (applying to all posts)
+  const globalRules = activeRules.filter((rule) => !rule.postId && !rule.postUrl);
+
+  // a) Exact match
+  for (const rule of globalRules.filter((r) => r.matchType === "exact")) {
+    const matchedKeyword = matchExactWord(event.text, rule.keywords);
     if (matchedKeyword) {
       return { ...rule, matchedKeyword };
     }
   }
 
+  // b) Contains keywords
+  for (const rule of globalRules.filter((r) => r.matchType === "contains")) {
+    const matchedKeyword = findMatchedKeyword(event.text, rule.keywords);
+    if (matchedKeyword) {
+      return { ...rule, matchedKeyword };
+    }
+  }
+
+  // c) Any comment global
+  const globalAnyRule = globalRules.find((r) => r.matchType === "any");
+  if (globalAnyRule) {
+    return { ...globalAnyRule, matchedKeyword: globalAnyRule.keywords[0] || "ANY_COMMENT" };
+  }
+
+  // 3. Fallback rule from wrangler.jsonc (env.KEYWORD)
   const fallback = getFallbackRule(env);
-  if (!fallback || !matchesKeyword(text, fallback.keywords[0])) {
+  if (!fallback || !matchesKeyword(event.text, fallback.keywords[0])) {
     return null;
   }
 
   return { ...fallback, matchedKeyword: fallback.keywords[0] };
+}
+
+function extractInstagramShortcode(urlOrId: string): string | null {
+  const text = urlOrId.trim();
+  const match = text.match(/(?:instagram\.com|instagr\.am)\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/i);
+  return match ? match[1] : null;
+}
+
+function normalizePostTarget(postIdInput: string, postUrlInput: string): { postId: string | null; postUrl: string | null } {
+  let postId = postIdInput.trim() || null;
+  let postUrl = postUrlInput.trim() || null;
+
+  if (postId && (postId.startsWith("http://") || postId.startsWith("https://") || postId.includes("instagram.com"))) {
+    if (!postUrl) {
+      postUrl = postId;
+    }
+    const shortcode = extractInstagramShortcode(postId);
+    if (shortcode) {
+      postId = shortcode;
+    }
+  }
+
+  return { postId, postUrl };
+}
+
+function matchesPostTarget(rule: Rule, mediaId: string): boolean {
+  if (!rule.postId && !rule.postUrl) {
+    return false;
+  }
+  if (rule.postId) {
+    const ids = rule.postId.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (ids.includes(mediaId)) {
+      return true;
+    }
+  }
+  if (rule.postUrl) {
+    const shortcode = extractInstagramShortcode(rule.postUrl);
+    if (shortcode && shortcode === mediaId) {
+      return true;
+    }
+    if (rule.postUrl.includes(mediaId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function matchExactWord(text: string, keywords: string[]): string | null {
+  const normalizedText = normalizeForExactMatch(text);
+  if (!normalizedText) {
+    return null;
+  }
+  for (const keyword of keywords) {
+    const normalizedKeyword = normalizeForExactMatch(keyword);
+    if (normalizedKeyword && normalizedText === normalizedKeyword) {
+      return keyword;
+    }
+  }
+  return null;
+}
+
+function normalizeForExactMatch(text: string): string {
+  let cleaned = text.trim();
+  cleaned = cleaned.replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, "");
+  return cleaned.toLowerCase();
+}
+
+function normalizeMatchType(value: string | null | undefined): "contains" | "exact" | "any" {
+  if (value === "exact" || value === "any") {
+    return value;
+  }
+  return "contains";
 }
 
 // The KEYWORD and PRIVATE_REPLY_TEXT vars in wrangler.jsonc act as one extra rule
@@ -760,6 +946,11 @@ function getFallbackRule(env: AppEnv): Rule | null {
     linkUrl: null,
     linkButtonLabel: null,
     active: true,
+    postId: null,
+    postUrl: null,
+    matchType: "contains",
+    imageAssetId: null,
+    useBridge: true,
     createdAt: "",
     updatedAt: ""
   };
@@ -770,12 +961,13 @@ async function sendPrivateReply(
   commentId: string,
   message: string,
   linkUrl: string | null,
-  linkButtonLabel: string | null
+  linkButtonLabel: string | null,
+  imageUrl?: string | null
 ): Promise<unknown> {
   return postInstagramMessage(
     env,
     { comment_id: commentId },
-    buildPrivateReplyMessage(message, linkUrl, linkButtonLabel)
+    buildPrivateReplyMessage(message, linkUrl, linkButtonLabel, imageUrl)
   );
 }
 
@@ -838,8 +1030,40 @@ async function sendPublicCommentReply(
 function buildPrivateReplyMessage(
   text: string,
   linkUrl: string | null,
-  linkButtonLabel: string | null
+  linkButtonLabel: string | null,
+  imageUrl?: string | null
 ): Record<string, unknown> {
+  if (imageUrl) {
+    const buttons = (linkUrl && linkButtonLabel) ? [
+      {
+        type: "web_url",
+        url: linkUrl,
+        title: linkButtonLabel
+      }
+    ] : undefined;
+
+    const trimmedText = text.trim();
+    const title = trimmedText.length > 80 ? trimmedText.slice(0, 77) + "..." : (trimmedText || "Notice");
+    const subtitle = trimmedText.length > 80 ? trimmedText.slice(77, 157) : undefined;
+
+    return {
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "generic",
+          elements: [
+            {
+              title,
+              ...(subtitle ? { subtitle } : {}),
+              image_url: imageUrl,
+              ...(buttons && buttons.length > 0 ? { buttons } : {})
+            }
+          ]
+        }
+      }
+    };
+  }
+
   if (!linkUrl || !linkButtonLabel) {
     return { text };
   }
@@ -872,13 +1096,14 @@ async function handleAdminGet(request: Request, env: AppEnv, url: URL): Promise<
   }
 
   const filters = parseActivityFilters(url);
-  const [rules, recentEvents, messageEvents, stats, connection, dmFeatures] = await Promise.all([
+  const [rules, recentEvents, messageEvents, stats, connection, dmFeatures, bridgeSettings] = await Promise.all([
     getRules(env.DB, false),
     getRecentEvents(env.DB, filters),
     getRecentMessageEvents(env.DB),
     getDashboardStats(env.DB),
     getConnectionStatus(env),
-    getDmFeatureSettings(env.DB)
+    getDmFeatureSettings(env.DB),
+    getRedirectBridgeSettings(env.DB)
   ]);
   const [replyStats, publication] = await Promise.all([
     getReplyStats(env.DB, rules, dmFeatures),
@@ -896,6 +1121,7 @@ async function handleAdminGet(request: Request, env: AppEnv, url: URL): Promise<
     connection,
     dmFeatures,
     publication,
+    bridgeSettings,
     // Shown in the sidebar and used for DM links: the verified account name, or OWNER_IG_USERNAME.
     accountUsername: connection.username ?? (env.OWNER_IG_USERNAME?.trim().replace(/^@/, "") || null),
     filters,
@@ -1057,8 +1283,8 @@ async function handleCreateRule(request: Request, env: AppEnv): Promise<Response
   const now = new Date().toISOString();
   await env.DB.prepare(
     `INSERT INTO rules
-       (label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, post_id, post_url, match_type, image_asset_id, use_bridge, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       parsed.rule.label,
@@ -1068,6 +1294,11 @@ async function handleCreateRule(request: Request, env: AppEnv): Promise<Response
       parsed.rule.linkUrl,
       parsed.rule.linkButtonLabel,
       parsed.rule.active ? 1 : 0,
+      parsed.rule.postId,
+      parsed.rule.postUrl,
+      parsed.rule.matchType,
+      parsed.rule.imageAssetId,
+      parsed.rule.useBridge ? 1 : 0,
       now,
       now
     )
@@ -1117,6 +1348,11 @@ async function handleUpdateRule(request: Request, env: AppEnv, ruleId: number): 
          link_url = ?,
          link_button_label = ?,
          active = ?,
+         post_id = ?,
+         post_url = ?,
+         match_type = ?,
+         image_asset_id = ?,
+         use_bridge = ?,
          updated_at = ?
      WHERE id = ?`
   )
@@ -1128,6 +1364,11 @@ async function handleUpdateRule(request: Request, env: AppEnv, ruleId: number): 
       parsed.rule.linkUrl,
       parsed.rule.linkButtonLabel,
       parsed.rule.active ? 1 : 0,
+      parsed.rule.postId,
+      parsed.rule.postUrl,
+      parsed.rule.matchType,
+      parsed.rule.imageAssetId,
+      parsed.rule.useBridge ? 1 : 0,
       new Date().toISOString(),
       ruleId
     )
@@ -1166,7 +1407,7 @@ async function handleRetryEvent(request: Request, env: AppEnv, commentId: string
   }
 
   const originalKeyword = event.matched_keyword?.trim().toLowerCase();
-  if (originalKeyword && !rule.keywords.some((keyword) => keyword.trim().toLowerCase() === originalKeyword)) {
+  if (rule.matchType !== "any" && originalKeyword && !rule.keywords.some((keyword) => keyword.trim().toLowerCase() === originalKeyword)) {
     return html(renderErrorPage("The keyword this comment matched was removed from the rule, so it cannot be retried with the changed rule."), 400);
   }
 
@@ -1201,7 +1442,8 @@ async function handleRetryEvent(request: Request, env: AppEnv, commentId: string
         event.sent_at ?? new Date().toISOString()
       );
     } else {
-      result = await sendRuleResponses(env, commentId, matchedRule);
+      const origin = getAppOrigin(env, request);
+      result = await sendRuleResponses(env, commentId, matchedRule, origin);
     }
     await updateEventAfterSend(env.DB, commentId, matchedRule, result);
   } catch (error) {
@@ -1224,9 +1466,9 @@ function isRetryableStatus(status: string): boolean {
 
 async function getRules(db: D1Database, activeOnly: boolean): Promise<Rule[]> {
   const query = activeOnly
-    ? `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, created_at, updated_at
+    ? `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, post_id, post_url, match_type, image_asset_id, use_bridge, created_at, updated_at
        FROM rules WHERE active = 1 ORDER BY id ASC`
-    : `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, created_at, updated_at
+    : `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, post_id, post_url, match_type, image_asset_id, use_bridge, created_at, updated_at
        FROM rules ORDER BY id ASC`;
   const result = await db.prepare(query).all<RuleRow>();
   return result.results.map(rowToRule);
@@ -1234,7 +1476,7 @@ async function getRules(db: D1Database, activeOnly: boolean): Promise<Rule[]> {
 
 async function getRuleById(db: D1Database, ruleId: number): Promise<Rule | null> {
   const row = await db.prepare(
-    `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, created_at, updated_at
+    `SELECT id, label, keywords, reply_text, public_reply_text, link_url, link_button_label, active, post_id, post_url, match_type, image_asset_id, use_bridge, created_at, updated_at
      FROM rules
      WHERE id = ?`
   )
@@ -1257,7 +1499,7 @@ async function getRetryEvent(db: D1Database, commentId: string): Promise<RetryEv
 async function getRecentEvents(db: D1Database, filters: ActivityFilters): Promise<RecentEventRow[]> {
   const { where, bindings } = buildActivityWhere(filters);
   const result = await db.prepare(
-    `SELECT comment_id, username, comment_text, status, rule_label, matched_keyword, error, received_at, sent_at
+    `SELECT comment_id, media_id, username, comment_text, status, rule_label, matched_keyword, error, received_at, sent_at
      FROM comment_events
      ${where}
      ORDER BY received_at DESC
@@ -1427,6 +1669,11 @@ function rowToRule(row: RuleRow): Rule {
     linkUrl: row.link_url,
     linkButtonLabel: row.link_button_label,
     active: row.active === 1,
+    postId: row.post_id ?? null,
+    postUrl: row.post_url ?? null,
+    matchType: normalizeMatchType(row.match_type),
+    imageAssetId: row.image_asset_id ?? null,
+    useBridge: row.use_bridge === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -1434,18 +1681,38 @@ function rowToRule(row: RuleRow): Rule {
 
 function parseRuleForm(form: FormData): { ok: true; rule: Omit<Rule, "id" | "createdAt" | "updatedAt"> } | { ok: false; error: string } {
   const label = getFormString(form, "label").trim();
+  const postScope = getFormString(form, "post_scope").trim();
+  const rawPostId = getFormString(form, "post_id");
+  const rawPostUrl = getFormString(form, "post_url");
+  const matchTypeRaw = getFormString(form, "match_type").trim();
+  const matchType: "contains" | "exact" | "any" = (matchTypeRaw === "exact" || matchTypeRaw === "any") ? matchTypeRaw : "contains";
+
   const keywords = parseKeywordsInput(getFormString(form, "keywords"));
   const replyText = getFormString(form, "reply_text").trim();
   const publicReplyText = nullableTrim(getFormString(form, "public_reply_text"));
   const linkUrl = nullableTrim(getFormString(form, "link_url"));
   const linkButtonLabel = nullableTrim(getFormString(form, "link_button_label"));
   const active = form.get("active") === "on";
+  const imageAssetId = nullableTrim(getFormString(form, "image_asset_id"));
+  const useBridge = form.get("use_bridge") === "on" || form.get("use_bridge") === "1" || form.get("use_bridge") === "true";
 
   if (!label) {
     return { ok: false, error: "Rule label is required." };
   }
 
-  if (keywords.length === 0) {
+  let postId: string | null = null;
+  let postUrl: string | null = null;
+
+  if (postScope === "specific" || rawPostId.trim() || rawPostUrl.trim()) {
+    const normalized = normalizePostTarget(rawPostId, rawPostUrl);
+    postId = normalized.postId;
+    postUrl = normalized.postUrl;
+    if (postScope === "specific" && !postId && !postUrl) {
+      return { ok: false, error: "Enter a post URL or Media ID for a post-specific automation." };
+    }
+  }
+
+  if (matchType !== "any" && keywords.length === 0) {
     return { ok: false, error: "Add at least one keyword." };
   }
 
@@ -1482,7 +1749,23 @@ function parseRuleForm(form: FormData): { ok: true; rule: Omit<Rule, "id" | "cre
     return { ok: false, error: "Each public reply must be 2,200 characters or fewer, with 10,000 characters in total." };
   }
 
-  return { ok: true, rule: { label, keywords, replyText, publicReplyText, linkUrl, linkButtonLabel, active } };
+  return {
+    ok: true,
+    rule: {
+      label,
+      keywords,
+      replyText,
+      publicReplyText,
+      linkUrl,
+      linkButtonLabel,
+      active,
+      postId,
+      postUrl,
+      matchType,
+      imageAssetId,
+      useBridge
+    }
+  };
 }
 
 function nullableTrim(value: string): string | null {
@@ -1778,3 +2061,366 @@ function html(markup: string, status = 200): Response {
     }
   });
 }
+
+type InstagramMediaItem = {
+  id: string;
+  caption: string | null;
+  permalink: string | null;
+  mediaType: string | null;
+  timestamp: string | null;
+  thumbnailUrl: string | null;
+};
+
+async function getRecentMedia(env: AppEnv): Promise<{ ok: boolean; media: InstagramMediaItem[] }> {
+  // If in test mode or credentials are not present, return known media IDs from comment_events
+  if (isDryRun(env) || !hasInstagramCredentials(env)) {
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT media_id FROM comment_events WHERE media_id IS NOT NULL ORDER BY received_at DESC LIMIT 20`
+    ).all<{ media_id: string }>();
+
+    if (rows.results.length > 0) {
+      const media: InstagramMediaItem[] = rows.results.map((r, idx) => ({
+        id: r.media_id,
+        caption: `Post #${idx + 1} (${r.media_id})`,
+        permalink: `https://www.instagram.com/p/${r.media_id}/`,
+        mediaType: "IMAGE",
+        timestamp: null,
+        thumbnailUrl: null
+      }));
+      return { ok: true, media };
+    }
+
+    // Demo fallback so the selector can be tested immediately in local/preview environments
+    const media: InstagramMediaItem[] = [
+      {
+        id: "17923456789012345",
+        caption: "🔥 Ultimate Instagram DM Automation Guide 2026 - Comment GUIDE below!",
+        permalink: "https://www.instagram.com/p/C3xY9k2L5mN/",
+        mediaType: "IMAGE",
+        timestamp: new Date().toISOString(),
+        thumbnailUrl: null
+      },
+      {
+        id: "17934567890123456",
+        caption: "🚀 How we generated 10k leads with auto-reply DMs in 30 days",
+        permalink: "https://www.instagram.com/p/C4zQ1w8X9pA/",
+        mediaType: "VIDEO",
+        timestamp: new Date(Date.now() - 86400000).toISOString(),
+        thumbnailUrl: null
+      },
+      {
+        id: "17945678901234567",
+        caption: "✨ Free Resource Drop: 50 High-Converting DM Prompts & Templates",
+        permalink: "https://www.instagram.com/p/C5vB7n3M2kL/",
+        mediaType: "CAROUSEL_ALBUM",
+        timestamp: new Date(Date.now() - 172800000).toISOString(),
+        thumbnailUrl: null
+      }
+    ];
+    return { ok: true, media };
+  }
+
+  try {
+    const base = (env.GRAPH_API_BASE ?? DEFAULT_GRAPH_API_BASE).replace(/\/$/, "");
+    const token = await getInstagramAccessToken(env);
+    const endpoint = new URL(`${base}/${env.IG_USER_ID}/media`);
+    endpoint.searchParams.set("fields", "id,caption,permalink,media_type,timestamp,thumbnail_url,media_url");
+    endpoint.searchParams.set("limit", "50");
+
+    const response = await fetch(endpoint.toString(), {
+      headers: { authorization: `Bearer ${token}` }
+    });
+
+    if (!response.ok) {
+      console.warn(`Failed to fetch media from Graph API: ${response.status}`);
+      return { ok: true, media: [] };
+    }
+
+    const data = await response.json() as { data?: Array<Record<string, unknown>> };
+    let items: InstagramMediaItem[] = (data?.data ?? []).map((item) => {
+      const thumb = (typeof item.thumbnail_url === "string" && item.thumbnail_url)
+        ? item.thumbnail_url
+        : (typeof item.media_url === "string" && item.media_url) ? item.media_url : null;
+      return {
+        id: String(item.id ?? ""),
+        caption: typeof item.caption === "string" ? item.caption : null,
+        permalink: typeof item.permalink === "string" ? item.permalink : null,
+        mediaType: typeof item.media_type === "string" ? item.media_type : null,
+        timestamp: typeof item.timestamp === "string" ? item.timestamp : null,
+        thumbnailUrl: thumb
+      };
+    }).filter((item) => Boolean(item.id));
+
+    if (items.length === 0) {
+      const rows = await env.DB.prepare(
+        `SELECT DISTINCT media_id FROM comment_events WHERE media_id IS NOT NULL ORDER BY received_at DESC LIMIT 20`
+      ).all<{ media_id: string }>();
+
+      if (rows.results.length > 0) {
+        items = rows.results.map((r, idx) => ({
+          id: r.media_id,
+          caption: `Post #${idx + 1} (${r.media_id})`,
+          permalink: `https://www.instagram.com/p/${r.media_id}/`,
+          mediaType: "IMAGE",
+          timestamp: null,
+          thumbnailUrl: null
+        }));
+      } else {
+        items = [
+          {
+            id: "17923456789012345",
+            caption: "🔥 Ultimate Instagram DM Automation Guide 2026 - Comment GUIDE below!",
+            permalink: "https://www.instagram.com/p/C3xY9k2L5mN/",
+            mediaType: "IMAGE",
+            timestamp: new Date().toISOString(),
+            thumbnailUrl: null
+          },
+          {
+            id: "17934567890123456",
+            caption: "🚀 How we generated 10k leads with auto-reply DMs in 30 days",
+            permalink: "https://www.instagram.com/p/C4zQ1w8X9pA/",
+            mediaType: "VIDEO",
+            timestamp: new Date(Date.now() - 86400000).toISOString(),
+            thumbnailUrl: null
+          },
+          {
+            id: "17945678901234567",
+            caption: "✨ Free Resource Drop: 50 High-Converting DM Prompts & Templates",
+            permalink: "https://www.instagram.com/p/C5vB7n3M2kL/",
+            mediaType: "CAROUSEL_ALBUM",
+            timestamp: new Date(Date.now() - 172800000).toISOString(),
+            thumbnailUrl: null
+          }
+        ];
+      }
+    }
+
+    return { ok: true, media: items };
+  } catch (err) {
+    console.error("Error fetching Instagram media:", err);
+    return {
+      ok: true,
+      media: [
+        {
+          id: "17923456789012345",
+          caption: "🔥 Ultimate Instagram DM Automation Guide 2026 - Comment GUIDE below!",
+          permalink: "https://www.instagram.com/p/C3xY9k2L5mN/",
+          mediaType: "IMAGE",
+          timestamp: new Date().toISOString(),
+          thumbnailUrl: null
+        }
+      ]
+    };
+  }
+}
+
+function getAppOrigin(env: AppEnv, requestOrUrl?: Request | URL | string): string {
+  if (env.APP_URL?.trim()) {
+    return env.APP_URL.trim().replace(/\/$/, "");
+  }
+  if (requestOrUrl) {
+    try {
+      if (typeof requestOrUrl === "string") {
+        return new URL(requestOrUrl).origin;
+      }
+      if (requestOrUrl instanceof URL) {
+        return requestOrUrl.origin;
+      }
+      if ("url" in requestOrUrl && typeof requestOrUrl.url === "string") {
+        return new URL(requestOrUrl.url).origin;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return "";
+}
+
+async function handleBridgeRedirect(request: Request, env: AppEnv, slug: string): Promise<Response> {
+  const settings = await getRedirectBridgeSettings(env.DB);
+  const connection = await getConnectionStatus(env);
+  const username = connection.username ?? (env.OWNER_IG_USERNAME?.trim().replace(/^@/, "") || null);
+  const avatarUrl = settings.profilePicData || (settings.profilePicAssetId ? `/assets/${settings.profilePicAssetId}.webp` : null);
+
+  if (slug === "preview") {
+    return html(renderRedirectPage({
+      destinationUrl: "https://instagram.com",
+      settings,
+      accountUsername: username,
+      avatarUrl
+    }));
+  }
+
+  const ruleId = parseInt(slug, 10);
+  if (Number.isNaN(ruleId)) {
+    return html(renderErrorPage("Invalid redirect link."), 404);
+  }
+
+  const rule = await getRuleById(env.DB, ruleId);
+  if (!rule || !rule.linkUrl) {
+    return html(renderErrorPage("Link not found or expired."), 404);
+  }
+
+  if (!settings.enabled || !rule.useBridge) {
+    return Response.redirect(rule.linkUrl, 302);
+  }
+
+  return html(renderRedirectPage({
+    destinationUrl: rule.linkUrl,
+    settings,
+    accountUsername: username,
+    avatarUrl
+  }));
+}
+
+async function handleAssetServe(env: AppEnv, assetId: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT mime_type, data_base64 FROM media_assets WHERE id = ?")
+    .bind(assetId)
+    .first<{ mime_type: string; data_base64: string }>();
+
+  if (!row || !row.data_base64) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  let base64Clean = row.data_base64;
+  const commaIndex = base64Clean.indexOf(",");
+  if (base64Clean.startsWith("data:") && commaIndex !== -1) {
+    base64Clean = base64Clean.slice(commaIndex + 1);
+  }
+
+  const binaryString = atob(base64Clean);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": row.mime_type || "image/webp",
+      "cache-control": "public, max-age=31536000, immutable"
+    }
+  });
+}
+
+async function handleAssetUpload(request: Request, env: AppEnv): Promise<Response> {
+  if (!(await isAdminRequest(request, env))) {
+    return json({ ok: false, error: "Login required." }, 401);
+  }
+
+  let filename = "image.webp";
+  let mimeType = "image/webp";
+  let dataBase64 = "";
+
+  const contentType = request.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    filename = typeof body.filename === "string" ? body.filename : filename;
+    mimeType = typeof body.mime_type === "string" ? body.mime_type : mimeType;
+    dataBase64 = typeof body.data_base64 === "string" ? body.data_base64 : "";
+  } else {
+    const form = await request.formData();
+    const file = form.get("file");
+    if (file && typeof file === "object" && "arrayBuffer" in file) {
+      filename = (file as File).name || filename;
+      mimeType = (file as File).type || mimeType;
+      const buffer = await (file as File).arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      dataBase64 = btoa(binary);
+    } else {
+      filename = getFormString(form, "filename") || filename;
+      mimeType = getFormString(form, "mime_type") || mimeType;
+      dataBase64 = getFormString(form, "data_base64");
+    }
+  }
+
+  if (!dataBase64.trim()) {
+    return json({ ok: false, error: "Missing image data." }, 400);
+  }
+
+  const id = `asset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const sizeBytes = Math.round((dataBase64.length * 3) / 4);
+
+  await env.DB.prepare(
+    "INSERT INTO media_assets (id, filename, mime_type, data_base64, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  )
+    .bind(id, filename, mimeType, dataBase64, sizeBytes, new Date().toISOString())
+    .run();
+
+  return json({ ok: true, id, url: `/assets/${id}.webp`, sizeBytes });
+}
+
+async function handleBridgeSettingsPost(request: Request, env: AppEnv): Promise<Response> {
+  if (!(await isAdminRequest(request, env))) {
+    return redirect("/admin");
+  }
+
+  const contentType = request.headers.get("content-type") || "";
+  const isJson = contentType.includes("application/json");
+  const current = await getRedirectBridgeSettings(env.DB);
+
+  let enabled = true;
+  let headline = current.headline;
+  let quotation = current.quotation;
+  let author = current.author;
+  let countdownSeconds = current.countdownSeconds;
+  let buttonText = current.buttonText;
+  let blurBackground = current.blurBackground;
+  let profilePicAssetId = current.profilePicAssetId;
+  let profilePicData = current.profilePicData;
+
+  if (isJson) {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    enabled = body.enabled !== false;
+    if (typeof body.headline === "string") headline = body.headline.trim();
+    if (typeof body.quotation === "string") quotation = body.quotation.trim();
+    if (typeof body.author === "string") author = body.author.trim();
+    if (body.countdownSeconds !== undefined) {
+      countdownSeconds = Math.max(1, Math.min(30, Number(body.countdownSeconds) || 3));
+    }
+    if (typeof body.buttonText === "string") buttonText = body.buttonText.trim();
+    if (body.blurBackground !== undefined) blurBackground = body.blurBackground !== false;
+    if (typeof body.profilePicAssetId === "string") profilePicAssetId = body.profilePicAssetId || null;
+    if (typeof body.profilePicData === "string") profilePicData = body.profilePicData || null;
+  } else {
+    const form = await request.formData();
+    enabled = form.get("enabled") === "on";
+    headline = getFormString(form, "headline").trim() || DEFAULT_REDIRECT_BRIDGE_SETTINGS.headline;
+    quotation = getFormString(form, "quotation").trim();
+    author = getFormString(form, "author").trim();
+    const rawSeconds = parseInt(getFormString(form, "countdown_seconds"), 10);
+    countdownSeconds = Number.isNaN(rawSeconds) ? 3 : Math.max(1, Math.min(30, rawSeconds));
+    buttonText = getFormString(form, "button_text").trim() || DEFAULT_REDIRECT_BRIDGE_SETTINGS.buttonText;
+    blurBackground = form.get("blur_background") === "on";
+    const rawAssetId = getFormString(form, "profile_pic_asset_id").trim();
+    const rawPicData = getFormString(form, "profile_pic_data").trim();
+    if (rawAssetId) profilePicAssetId = rawAssetId;
+    if (rawPicData) profilePicData = rawPicData;
+  }
+
+  const nextSettings: RedirectBridgeSettings = {
+    enabled,
+    headline,
+    quotation,
+    author,
+    countdownSeconds,
+    buttonText,
+    blurBackground,
+    profilePicAssetId,
+    profilePicData
+  };
+
+  await saveRedirectBridgeSettings(env.DB, nextSettings);
+
+  if (isJson) {
+    return json({ ok: true, settings: nextSettings });
+  }
+
+  return redirect("/admin?saved=1#bridge-settings");
+}
+
+

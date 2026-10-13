@@ -307,3 +307,116 @@ test("the dashboard escapes rule copy, comments and usernames", async (t) => {
   assert.ok(html.includes("&quot;&gt;&lt;script&gt;alert(3)&lt;/script&gt;"));
   assert.equal(h.calls.length, 0);
 });
+
+test("post-specific rule triggers for comments on that specific post (any comment, exact word, or keywords)", async (t) => {
+  const h = await fixture(t);
+  const cookie = await h.login();
+
+  // 1. Post A: Any comment trigger
+  await h.postForm("/admin/rules", {
+    label: "Post A Any Comment",
+    post_scope: "specific",
+    post_id: "media-post-a",
+    match_type: "any",
+    keywords: "",
+    reply_text: "Thanks for commenting on Post A! Here is the Post A bonus.",
+    active: "on",
+  }, cookie);
+
+  // 2. Post B: Exact word trigger
+  await h.postForm("/admin/rules", {
+    label: "Post B Exact Word",
+    post_scope: "specific",
+    post_id: "media-post-b",
+    match_type: "exact",
+    keywords: "PROMPT, BONUS",
+    reply_text: "Here is the exact prompt for Post B!",
+    active: "on",
+  }, cookie);
+
+  // Helper for custom media IDs
+  const payloadFor = (id, text, mediaId) => {
+    const p = commentPayload(id, text);
+    p.entry[0].changes[0].value.media = { id: mediaId };
+    return p;
+  };
+
+  // Test Post A: ANY comment ("Love this post!") triggers Post A reply
+  await h.webhook(payloadFor("comment-any-1", "Love this post!", "media-post-a"));
+  assert.equal(eventRow(h, "comment-any-1").status, "sent");
+  assert.equal(eventRow(h, "comment-any-1").rule_label, "Post A Any Comment");
+  assert.deepEqual(privateCalls(h).pop().body.message, { text: "Thanks for commenting on Post A! Here is the Post A bonus." });
+
+  // Same "Love this post!" comment on a DIFFERENT post (Post C) should NOT trigger Post A rule
+  await h.webhook(payloadFor("comment-diff-post", "Love this post!", "media-post-c"));
+  assert.equal(eventRow(h, "comment-diff-post").status, "ignored_no_keyword");
+
+  // Test Post B: Exact word "PROMPT" triggers Post B
+  await h.webhook(payloadFor("comment-exact-1", "PROMPT", "media-post-b"));
+  assert.equal(eventRow(h, "comment-exact-1").status, "sent");
+  assert.equal(eventRow(h, "comment-exact-1").rule_label, "Post B Exact Word");
+  assert.equal(eventRow(h, "comment-exact-1").matched_keyword, "PROMPT");
+
+  // Test Post B: Exact word with punctuation / lowercase ("prompt!") triggers Post B
+  await h.webhook(payloadFor("comment-exact-2", "prompt!", "media-post-b"));
+  assert.equal(eventRow(h, "comment-exact-2").status, "sent");
+  assert.equal(eventRow(h, "comment-exact-2").matched_keyword, "PROMPT");
+
+  // Test Post B: Non-exact sentence ("Where can I find the prompt?") does NOT trigger exact rule
+  await h.webhook(payloadFor("comment-not-exact", "Where can I find the prompt?", "media-post-b"));
+  assert.equal(eventRow(h, "comment-not-exact").status, "ignored_no_keyword");
+});
+
+test("post-specific rules take precedence over global rules", async (t) => {
+  const h = await fixture(t);
+  const cookie = await h.login();
+
+  // Global rule: matches "GUIDE" anywhere
+  await h.postForm("/admin/rules", {
+    label: "Global Guide",
+    post_scope: "all",
+    match_type: "contains",
+    keywords: "GUIDE",
+    reply_text: "General global guide.",
+    active: "on",
+  }, cookie);
+
+  // Post-specific rule for media-special: matches "GUIDE"
+  await h.postForm("/admin/rules", {
+    label: "Special Post Guide",
+    post_scope: "specific",
+    post_id: "media-special",
+    match_type: "contains",
+    keywords: "GUIDE",
+    reply_text: "Special VIP guide for this post!",
+    active: "on",
+  }, cookie);
+
+  const payloadFor = (id, text, mediaId) => {
+    const p = commentPayload(id, text);
+    p.entry[0].changes[0].value.media = { id: mediaId };
+    return p;
+  };
+
+  // Comment on media-special -> receives the Special Post Guide
+  await h.webhook(payloadFor("comment-special", "Send the GUIDE please", "media-special"));
+  assert.equal(eventRow(h, "comment-special").rule_label, "Special Post Guide");
+  assert.deepEqual(privateCalls(h).pop().body.message, { text: "Special VIP guide for this post!" });
+
+  // Comment on media-other -> receives Global Guide
+  await h.webhook(payloadFor("comment-global", "Send the GUIDE please", "media-other"));
+  assert.equal(eventRow(h, "comment-global").rule_label, "Global Guide");
+  assert.deepEqual(privateCalls(h).pop().body.message, { text: "General global guide." });
+});
+
+test("admin media endpoint returns recent media for the post selector", async (t) => {
+  const h = await fixture(t);
+  const cookie = await h.login();
+
+  const response = await h.request("/admin/media", { headers: { cookie } });
+  assert.equal(response.status, 200);
+  const json = await response.json();
+  assert.equal(json.ok, true);
+  assert.ok(Array.isArray(json.media));
+});
+

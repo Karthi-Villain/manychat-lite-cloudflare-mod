@@ -9,12 +9,39 @@ export type Rule = {
   linkUrl: string | null;
   linkButtonLabel: string | null;
   active: boolean;
+  postId: string | null;
+  postUrl: string | null;
+  matchType: "contains" | "exact" | "any";
+  imageAssetId: string | null;
+  useBridge: boolean;
   createdAt: string;
   updatedAt: string;
 };
 
+export type RedirectBridgeSettings = {
+  enabled: boolean;
+  profilePicData: string | null;
+  profilePicAssetId: string | null;
+  headline: string;
+  quotation: string;
+  author: string;
+  countdownSeconds: number;
+  buttonText: string;
+  blurBackground: boolean;
+};
+
+export type MediaAsset = {
+  id: string;
+  filename: string | null;
+  mimeType: string;
+  dataBase64: string;
+  sizeBytes: number;
+  createdAt: string;
+};
+
 export type RecentEventRow = {
   comment_id: string;
+  media_id: string | null;
   username: string | null;
   comment_text: string;
   status: string;

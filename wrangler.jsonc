@@ -8,7 +8,9 @@
 	],
 	// Daily Instagram connection check and token renewal (skipped while DRY_RUN is "true").
 	"triggers": {
-		"crons": ["0 6 * * *"]
+		"crons": [
+			"0 6 * * *"
+		]
 	},
 	"observability": {
 		"enabled": true,
@@ -18,13 +20,13 @@
 		"GRAPH_API_BASE": "https://graph.instagram.com/v25.0",
 		"KEYWORD": "guide",
 		"PRIVATE_REPLY_TEXT": "Thanks for commenting. Here is the link: https://example.com",
-		"DRY_RUN": "true"
+		"DRY_RUN": "false"
 	},
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "manychat-lite-cloudflare",
-			"database_id": "REPLACE_WITH_D1_DATABASE_ID",
+			"database_id": "79534367-1802-4ac5-92bd-0da48b19d5b9",
 			"migrations_dir": "./migrations"
 		}
 	]

@@ -12,6 +12,7 @@ import type {
   DashboardStats,
   RecentEventRow,
   RecentMessageRow,
+  RedirectBridgeSettings,
   ReplyStatsRow,
   Rule
 } from "./types";
@@ -31,6 +32,7 @@ export type DashboardData = {
   accountUsername: string | null;
   filters: ActivityFilters;
   flash: string | null;
+  bridgeSettings?: RedirectBridgeSettings;
 };
 
 const icons: Record<string, string> = {
@@ -114,6 +116,7 @@ export function renderDashboardPage(data: DashboardData): string {
     <nav class="primary-nav" aria-label="Dashboard navigation">
       <a class="selected" href="#overview">${icon("grid")}Overview</a>
       <a href="#automations">${icon("bolt")}Automations<span class="nav-count">${data.rules.length}</span></a>
+      <a href="#bridge-settings">${icon("link")}Link bridge</a>
       <a href="#dm-tools">${icon("message")}DM tools</a>
       <a href="#performance">${icon("chart")}Reply stats</a>
       <a href="#activity">${icon("activity")}Activity</a>
@@ -147,6 +150,7 @@ export function renderDashboardPage(data: DashboardData): string {
     <aside class="right-column">
       ${previewPanel(firstRule, handle, avatar)}
     </aside></div>
+    ${renderBridgeSettingsPanel(data.bridgeSettings, data.accountUsername)}
     ${renderDmFeaturesPanel({
       settings: data.dmFeatures,
       publication: data.publication,
@@ -160,6 +164,88 @@ export function renderDashboardPage(data: DashboardData): string {
     <div id="comment-activity" role="tabpanel" aria-labelledby="comments-tab">${filters(data.filters)}${comments(data.recentEvents, data.dryRun)}</div><div id="message-activity" role="tabpanel" aria-labelledby="messages-tab" hidden><p class="muted small activity-note">Latest 30 incoming DMs, conversation starter taps, story replies and DM link opens. Filters apply to comments only.</p>${messages(data.messageEvents)}</div></section>
     ${connectionPanel(data.connection, data.dryRun)}
   </main></div>${newRuleDialog()}<script>${clientScript}${dmFeaturesClientScript}</script></body></html>`;
+}
+
+function renderBridgeSettingsPanel(settings: RedirectBridgeSettings | undefined, accountUsername: string | null): string {
+  const effective = settings ?? {
+    enabled: true,
+    profilePicData: null,
+    profilePicAssetId: null,
+    headline: "Your link is almost ready...",
+    quotation: "Good things come to those who create. ✨",
+    author: "",
+    countdownSeconds: 3,
+    buttonText: "Open Link Now →",
+    blurBackground: true
+  };
+  const avatar = effective.profilePicData || (effective.profilePicAssetId ? `/assets/${effective.profilePicAssetId}.webp` : null);
+
+  return `<section id="bridge-settings" class="panel bridge-panel">
+    <div class="section-heading">
+      <div>
+        <h2>Link Bridge &amp; Profile Waiting Page</h2>
+        <p class="muted small">Shows an interactive 3-second waiting card with your Instagram profile picture, custom message/quote, and animated countdown before opening button links.</p>
+      </div>
+      <div class="heading-actions">
+        ${badge(effective.enabled ? "Enabled" : "Disabled", effective.enabled ? "green" : "neutral")}
+        <a href="/r/preview" target="_blank" rel="noopener noreferrer" class="button secondary small-btn">Live preview ↗</a>
+      </div>
+    </div>
+
+    <form action="/admin/bridge-settings" method="post" class="bridge-form stack">
+      <div class="bridge-top-grid">
+        <div class="avatar-upload-box">
+          <span class="field-label-text">Instagram Profile Picture</span>
+          <div class="avatar-preview-circle">
+            ${avatar ? `<img src="${esc(avatar)}" class="bridge-avatar-preview" alt="Profile avatar">` : `<div class="avatar-placeholder">${initials(accountUsername)}</div>`}
+          </div>
+          <input type="file" accept="image/*" class="bridge-avatar-input" title="Upload profile picture">
+          <input type="hidden" name="profile_pic_asset_id" value="${esc(effective.profilePicAssetId ?? "")}">
+          <input type="hidden" name="profile_pic_data" value="${esc(effective.profilePicData ?? "")}">
+          <span class="field-help">Auto-compressed into WebP &amp; stored directly in Cloudflare D1.</span>
+        </div>
+
+        <div class="bridge-fields-column">
+          <label class="switch-label">
+            <input type="checkbox" name="enabled" ${effective.enabled ? "checked" : ""}>
+            <span class="switch"></span>
+            <strong>Enable 3-second profile waiting page</strong>
+          </label>
+
+          <label>Headline
+            <input name="headline" value="${esc(effective.headline)}" placeholder="Your link is almost ready..." maxlength="120">
+          </label>
+
+          <div class="two-fields">
+            <label>Custom message or quotation
+              <input name="quotation" value="${esc(effective.quotation)}" placeholder="Good things come to those who create. ✨" maxlength="250">
+            </label>
+            <label>Quotation author <span class="optional">optional</span>
+              <input name="author" value="${esc(effective.author)}" placeholder="${esc(accountUsername ? `@${accountUsername}` : "Creator")}" maxlength="60">
+            </label>
+          </div>
+
+          <div class="two-fields">
+            <label>Countdown (seconds)
+              <input type="number" name="countdown_seconds" min="1" max="30" value="${effective.countdownSeconds || 3}">
+            </label>
+            <label>Skip button text
+              <input name="button_text" value="${esc(effective.buttonText)}" placeholder="Open Link Now →" maxlength="50">
+            </label>
+          </div>
+
+          <label class="checkbox-opt">
+            <input type="checkbox" name="blur_background" ${effective.blurBackground ? "checked" : ""}>
+            <span>Ambient background blur aura effect</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="button primary">Save bridge settings</button>
+      </div>
+    </form>
+  </section>`;
 }
 
 function connectionPanel(connection: InstagramTokenStatus, dryRun: boolean): string {
@@ -186,11 +272,18 @@ type ReplyPreview = {
 };
 
 function rulePreview(rule: Rule): ReplyPreview {
+  let keyword = rule.keywords[0]?.toUpperCase() ?? "";
+  if (rule.matchType === "any") {
+    keyword = "ANY COMMENT";
+  } else if (rule.matchType === "exact") {
+    keyword = `EXACT: ${keyword}`;
+  }
+  const source = rule.postId || rule.postUrl ? "POST COMMENT → DM" : "COMMENT → DM";
   return {
     title: rule.label,
-    keyword: rule.keywords[0]?.toUpperCase() ?? "",
+    keyword,
     text: rule.replyText,
-    source: "COMMENT → DM",
+    source,
     active: rule.active,
     publicReply: rule.publicReplyText ?? "",
     buttons: rule.linkUrl && rule.linkButtonLabel ? [{ title: rule.linkButtonLabel, url: rule.linkUrl }] : []
@@ -207,9 +300,99 @@ function previewPanel(rule: Rule | undefined, handle: string, avatar: string): s
 
 function ruleCard(rule: Rule, stats?: ReplyStatsRow): string {
   const glyph = rule.linkUrl ? "link" : "message";
-  return `<details class="rule-card ${rule.active ? "" : "paused"}" data-search="${esc([rule.label, ...rule.keywords].join(" ").toLowerCase())}" data-preview="${esc(JSON.stringify(rulePreview(rule)))}"><summary><span class="flow-icon ${rule.linkUrl ? "link" : "text"}">${icon(glyph)}</span><span class="rule-summary"><strong>${esc(rule.label)}</strong><span class="rule-meta">Comment keyword <span class="tiny-arrow">→</span> Send a DM${rule.linkUrl ? " with a link" : ""}</span><span class="chips">${rule.keywords.map((key) => `<span>${esc(key.toUpperCase())}</span>`).join("")}</span></span><span class="rule-end">${badge(rule.active ? "Active" : "Paused", rule.active ? "green" : "neutral")}<span class="delivery-count">${number(stats?.sent ?? 0)} sent</span></span><span class="chevron">⌄</span></summary>
-    <form action="/admin/rules/${rule.id}" method="post" class="rule-edit"><div class="two-fields"><label>Automation name<input name="label" value="${esc(rule.label)}" required maxlength="100"></label><label>Keywords<input name="keywords" value="${esc(rule.keywords.join(", "))}" required></label></div>
-    <label>DM message<textarea name="reply_text" rows="3" required>${esc(rule.replyText)}</textarea></label><label>Public comment reply <span class="optional">optional · one variation per line</span><textarea name="public_reply_text" rows="2">${esc(rule.publicReplyText ?? "")}</textarea></label><div class="two-fields"><label>Button link<input name="link_url" type="url" value="${esc(rule.linkUrl ?? "")}" placeholder="https://…"></label><label>Button label<input name="link_button_label" value="${esc(rule.linkButtonLabel ?? "")}" maxlength="20" placeholder="Read more"></label></div><div class="form-actions"><label class="switch-label"><input type="checkbox" name="active" ${rule.active ? "checked" : ""}><span class="switch"></span>Active</label><div><button class="button danger" name="action" value="delete" formnovalidate data-delete>Delete</button><button class="button primary" name="action" value="save">Save changes</button></div></div></form></details>`;
+  const postScoped = Boolean(rule.postId || rule.postUrl);
+  const matchBadge = rule.matchType === "any"
+    ? badge("Any comment", "amber")
+    : rule.matchType === "exact"
+      ? badge("Exact word", "purple")
+      : badge("Keywords", "green");
+  const scopeBadge = postScoped ? badge("Specific post", "blue") : badge("All posts", "neutral");
+  const chipsHtml = rule.matchType === "any"
+    ? '<span>ANY COMMENT</span>'
+    : rule.keywords.map((key) => `<span>${esc(key.toUpperCase())}</span>`).join("");
+  const postTargetLabel = postScoped ? `Post: ${esc(rule.postId || rule.postUrl || "Specific post")}` : "All posts";
+
+  return `<details class="rule-card ${rule.active ? "" : "paused"}" data-search="${esc([rule.label, rule.postId ?? "", rule.postUrl ?? "", ...rule.keywords].join(" ").toLowerCase())}" data-preview="${esc(JSON.stringify(rulePreview(rule)))}"><summary><span class="flow-icon ${rule.linkUrl ? "link" : "text"}">${icon(glyph)}</span><span class="rule-summary"><strong>${esc(rule.label)}</strong><span class="rule-meta">${esc(postTargetLabel)} <span class="tiny-arrow">→</span> Send a DM${rule.linkUrl ? " with a link" : ""}</span><span class="chips">${scopeBadge}${matchBadge}${chipsHtml}</span></span><span class="rule-end">${badge(rule.active ? "Active" : "Paused", rule.active ? "green" : "neutral")}<span class="delivery-count">${number(stats?.sent ?? 0)} sent</span></span><span class="chevron">⌄</span></summary>
+    <form action="/admin/rules/${rule.id}" method="post" class="rule-edit">
+      <div class="two-fields">
+        <label>Automation name<input name="label" value="${esc(rule.label)}" required maxlength="100"></label>
+        <div>
+          <span class="field-label-text">Target post</span>
+          <div class="segmented-control">
+            <label><input type="radio" name="post_scope" value="all" ${!postScoped ? "checked" : ""}><span>All posts</span></label>
+            <label><input type="radio" name="post_scope" value="specific" ${postScoped ? "checked" : ""}><span>Specific post</span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="specific-post-box" ${postScoped ? "" : "hidden"}>
+        <div class="two-fields">
+          <label>Post URL or Media ID
+            <input name="post_id" value="${esc(rule.postId ?? "")}" placeholder="e.g. 17923456789 or https://www.instagram.com/p/...">
+            <span class="field-help">Numeric Instagram Media ID or shortcode</span>
+          </label>
+          <label>Post link <span class="optional">optional</span>
+            <input name="post_url" type="url" value="${esc(rule.postUrl ?? "")}" placeholder="https://www.instagram.com/p/...">
+          </label>
+        </div>
+        <div class="post-picker-bar">
+          <button type="button" class="button secondary small-btn" data-load-posts>${icon("instagram")} Browse recent posts</button>
+          <span class="field-help recent-posts-status"></span>
+        </div>
+      </div>
+
+      <div class="trigger-mode-box">
+        <span class="field-label-text">When someone comments</span>
+        <div class="trigger-options">
+          <label class="trigger-opt">
+            <input type="radio" name="match_type" value="contains" ${rule.matchType === "contains" ? "checked" : ""}>
+            <div><strong>Contains keywords</strong><span>Comment contains any of the keywords</span></div>
+          </label>
+          <label class="trigger-opt">
+            <input type="radio" name="match_type" value="exact" ${rule.matchType === "exact" ? "checked" : ""}>
+            <div><strong>Exact word or phrase</strong><span>Comment matches the exact word (e.g. PROMPT)</span></div>
+          </label>
+          <label class="trigger-opt">
+            <input type="radio" name="match_type" value="any" ${rule.matchType === "any" ? "checked" : ""}>
+            <div><strong>Any comment</strong><span>Any comment on this post triggers the reply</span></div>
+          </label>
+        </div>
+      </div>
+
+      <label class="keywords-field" ${rule.matchType === "any" ? "hidden" : ""}>Keywords
+        <input name="keywords" value="${esc(rule.keywords.join(", "))}" ${rule.matchType === "any" ? "" : "required"}>
+        <span class="field-help">Separate multiple keywords with commas. Comments match without case sensitivity.</span>
+      </label>
+
+      <label>DM message<textarea name="reply_text" rows="3" required>${esc(rule.replyText)}</textarea></label>
+      <label>Public comment reply <span class="optional">optional · one variation per line</span><textarea name="public_reply_text" rows="2">${esc(rule.publicReplyText ?? "")}</textarea></label>
+      <div class="two-fields">
+        <label>Button link<input name="link_url" type="url" value="${esc(rule.linkUrl ?? "")}" placeholder="https://…"></label>
+        <label>Button label<input name="link_button_label" value="${esc(rule.linkButtonLabel ?? "")}" maxlength="20" placeholder="Read more"></label>
+      </div>
+      <label class="checkbox-opt">
+        <input type="checkbox" name="use_bridge" ${rule.useBridge ? "checked" : ""}>
+        <span>Open link via 3-second profile waiting page</span>
+      </label>
+      <div class="image-attachment-box">
+        <span class="field-label-text">DM image attachment <span class="optional">optional · WebP</span></span>
+        <input type="hidden" name="image_asset_id" value="${esc(rule.imageAssetId ?? "")}">
+        <div class="image-preview-wrapper" ${rule.imageAssetId ? "" : "hidden"}>
+          <img src="${rule.imageAssetId ? `/assets/${esc(rule.imageAssetId)}.webp` : ""}" class="dm-image-thumb" alt="Attached image">
+          <button type="button" class="button danger small-btn" data-remove-image>Remove image</button>
+        </div>
+        <input type="file" accept="image/*" class="dm-image-file-input" ${rule.imageAssetId ? "hidden" : ""}>
+        <span class="field-help">Images are compressed to WebP and saved directly in Cloudflare database.</span>
+      </div>
+      <div class="form-actions">
+        <label class="switch-label"><input type="checkbox" name="active" ${rule.active ? "checked" : ""}><span class="switch"></span>Active</label>
+        <div>
+          <button class="button danger" name="action" value="delete" formnovalidate data-delete>Delete</button>
+          <button class="button primary" name="action" value="save">Save changes</button>
+        </div>
+      </div>
+    </form>
+  </details>`;
 }
 
 function analytics(rows: ReplyStatsRow[]): string {
@@ -238,7 +421,11 @@ function status(value: string): string {
 
 function comments(rows: RecentEventRow[], dryRun: boolean): string {
   if (!rows.length) return `<div class="empty">${icon("message")}<strong>No matching comments.</strong><p>Comments appear here once Instagram sends them. Clear the filters to see all comments.</p></div>`;
-  return `<div class="events">${rows.map((row) => `<article class="event"><div class="event-avatar">${esc((row.username ?? "?").slice(0, 1).toUpperCase())}</div><div class="event-body"><div class="event-title"><strong>${esc(row.username ? "@" + row.username : "Unknown user")}</strong>${time(row.received_at)}</div><p>${esc(row.comment_text)}</p><span class="event-rule">${esc(row.rule_label ?? "No matching automation")}${row.matched_keyword ? ` <span>· ${esc(row.matched_keyword.toUpperCase())}</span>` : ""}</span>${row.error ? `<details class="error-details"><summary>View error</summary><p>${esc(row.error)}</p></details>` : ""}</div><div class="event-state">${status(row.status)}${!dryRun && (row.status === "send_error" || row.status === "sent_public_reply_error") ? `<form action="/admin/events/${encodeURIComponent(row.comment_id)}/retry" method="post"><button class="text-link">${row.status === "sent_public_reply_error" ? "Retry public reply" : "Retry send"} ↗</button></form>` : ""}</div></article>`).join("")}</div><p class="field-help">Showing the latest ${rows.length} matching comments (up to 50).</p>`;
+  return `<div class="events">${rows.map((row) => {
+    const postTag = row.media_id ? `<span class="event-post-id" title="Instagram Media ID">${icon("instagram")} ${esc(row.media_id)}</span>` : "";
+    const keywordDisplay = row.matched_keyword === "ANY_COMMENT" ? "Any comment" : row.matched_keyword ? esc(row.matched_keyword.toUpperCase()) : "";
+    return `<article class="event"><div class="event-avatar">${esc((row.username ?? "?").slice(0, 1).toUpperCase())}</div><div class="event-body"><div class="event-title"><strong>${esc(row.username ? "@" + row.username : "Unknown user")}</strong>${time(row.received_at)}</div><p>${esc(row.comment_text)}</p><span class="event-rule">${esc(row.rule_label ?? "No matching automation")}${keywordDisplay ? ` <span>· ${keywordDisplay}</span>` : ""}${postTag ? ` <span>· ${postTag}</span>` : ""}</span>${row.error ? `<details class="error-details"><summary>View error</summary><p>${esc(row.error)}</p></details>` : ""}</div><div class="event-state">${status(row.status)}${!dryRun && (row.status === "send_error" || row.status === "sent_public_reply_error") ? `<form action="/admin/events/${encodeURIComponent(row.comment_id)}/retry" method="post"><button class="text-link">${row.status === "sent_public_reply_error" ? "Retry public reply" : "Retry send"} ↗</button></form>` : ""}</div></article>`;
+  }).join("")}</div><p class="field-help">Showing the latest ${rows.length} matching comments (up to 50).</p>`;
 }
 
 function messages(rows: RecentMessageRow[]): string {
@@ -247,7 +434,76 @@ function messages(rows: RecentMessageRow[]): string {
 }
 
 function newRuleDialog(): string {
-  return `<dialog id="new-rule"><div class="dialog-heading"><div><h2>New keyword automation</h2></div><button class="close-dialog" aria-label="Close dialog" type="button">×</button></div><form method="post" action="/admin/rules" class="stack"><label>Automation name<input name="label" placeholder="Free guide" maxlength="100" required></label><label>Keywords<input name="keywords" placeholder="GUIDE, checklist" required><span class="field-help">Separate keywords with commas. Comments match without case sensitivity.</span></label><label>DM message<textarea name="reply_text" rows="4" placeholder="Here’s the link: https://…" required></textarea></label><label>Public comment reply <span class="optional">optional · one variation per line</span><textarea name="public_reply_text" rows="2" placeholder="Sent you a DM."></textarea></label><div class="two-fields"><label>Button link<input name="link_url" type="url" placeholder="https://…"></label><label>Button label<input name="link_button_label" maxlength="20" placeholder="Read more"></label></div><div class="form-actions"><label class="switch-label"><input name="active" type="checkbox" checked><span class="switch"></span>Active</label><button class="button primary">Create automation ${icon("arrow")}</button></div></form></dialog>`;
+  return `<dialog id="new-rule"><div class="dialog-heading"><div><h2>New automation</h2></div><button class="close-dialog" aria-label="Close dialog" type="button">×</button></div><form method="post" action="/admin/rules" class="stack">
+    <label>Automation name<input name="label" placeholder="Post promotion / Lead magnet" maxlength="100" required></label>
+    <div>
+      <span class="field-label-text">Target post</span>
+      <div class="segmented-control">
+        <label><input type="radio" name="post_scope" value="all" checked><span>All posts &amp; reels</span></label>
+        <label><input type="radio" name="post_scope" value="specific"><span>Specific post or reel</span></label>
+      </div>
+    </div>
+    <div class="specific-post-box" hidden>
+      <div class="two-fields">
+        <label>Post URL or Media ID
+          <input name="post_id" placeholder="e.g. 17923456789 or https://www.instagram.com/p/...">
+          <span class="field-help">Instagram numeric Media ID or paste post URL</span>
+        </label>
+        <label>Post link <span class="optional">optional</span>
+          <input name="post_url" type="url" placeholder="https://www.instagram.com/p/...">
+        </label>
+      </div>
+      <div class="post-picker-bar">
+        <button type="button" class="button secondary small-btn" data-load-posts>${icon("instagram")} Browse recent posts</button>
+        <span class="field-help recent-posts-status"></span>
+      </div>
+    </div>
+    <div class="trigger-mode-box">
+      <span class="field-label-text">When someone comments</span>
+      <div class="trigger-options">
+        <label class="trigger-opt">
+          <input type="radio" name="match_type" value="contains" checked>
+          <div><strong>Contains keywords</strong><span>Comment contains any keyword</span></div>
+        </label>
+        <label class="trigger-opt">
+          <input type="radio" name="match_type" value="exact">
+          <div><strong>Exact word or phrase</strong><span>Comment matches exact word (e.g. PROMPT)</span></div>
+        </label>
+        <label class="trigger-opt">
+          <input type="radio" name="match_type" value="any">
+          <div><strong>Any comment</strong><span>Any comment on this post triggers the reply</span></div>
+        </label>
+      </div>
+    </div>
+    <label class="keywords-field">Keywords
+      <input name="keywords" placeholder="GUIDE, checklist, free" required>
+      <span class="field-help">Separate multiple keywords with commas. Matches without case sensitivity.</span>
+    </label>
+    <label>DM message<textarea name="reply_text" rows="3" placeholder="Here’s the link: https://…" required></textarea></label>
+    <label>Public comment reply <span class="optional">optional · one variation per line</span><textarea name="public_reply_text" rows="2" placeholder="Sent you a DM!&#10;Check your inbox!"></textarea></label>
+    <div class="two-fields">
+      <label>Button link<input name="link_url" type="url" placeholder="https://…"></label>
+      <label>Button label<input name="link_button_label" maxlength="20" placeholder="Read more"></label>
+    </div>
+    <label class="checkbox-opt">
+      <input type="checkbox" name="use_bridge" checked>
+      <span>Open link via 3-second profile waiting page</span>
+    </label>
+    <div class="image-attachment-box">
+      <span class="field-label-text">DM image attachment <span class="optional">optional · WebP</span></span>
+      <input type="hidden" name="image_asset_id" value="">
+      <div class="image-preview-wrapper" hidden>
+        <img src="" class="dm-image-thumb" alt="Attached image">
+        <button type="button" class="button danger small-btn" data-remove-image>Remove image</button>
+      </div>
+      <input type="file" accept="image/*" class="dm-image-file-input">
+      <span class="field-help">Images are compressed to WebP and saved directly in Cloudflare database.</span>
+    </div>
+    <div class="form-actions">
+      <label class="switch-label"><input name="active" type="checkbox" checked><span class="switch"></span>Active</label>
+      <button class="button primary">Create automation ${icon("arrow")}</button>
+    </div>
+  </form></dialog>`;
 }
 
 const clientScript = `
@@ -255,7 +511,7 @@ const dialog = document.getElementById('new-rule');
 document.querySelectorAll('[data-new-rule]').forEach(button => button.addEventListener('click', () => dialog.showModal()));
 document.querySelector('.close-dialog').addEventListener('click', () => dialog.close());
 dialog.addEventListener('click', event => { if (event.target === dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } });
-document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', event => { if (!confirm('Delete this keyword automation?')) event.preventDefault(); }));
+document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', event => { if (!confirm('Delete this automation?')) event.preventDefault(); }));
 document.getElementById('rule-search').addEventListener('input', event => { const query = event.target.value.trim().toLowerCase(); const rules = [...document.querySelectorAll('[data-search]')]; let count = 0; rules.forEach(rule => { rule.hidden = !rule.dataset.search.includes(query); if (!rule.hidden) count++; }); document.getElementById('no-rules').hidden = count > 0 || !query; });
 const previewPanel = document.getElementById('reply-preview');
 const previewMessage = document.getElementById('preview-message');
@@ -280,7 +536,17 @@ function previewRule(card) {
   const config = JSON.parse(card.dataset.preview);
   const form = card.querySelector('form');
   config.title = form.elements.namedItem('label').value || 'Reply';
-  config.keyword = form.elements.namedItem('keywords').value.split(',')[0].trim().toUpperCase();
+  const matchType = form.querySelector('input[name="match_type"]:checked')?.value || 'contains';
+  const isSpecific = form.querySelector('input[name="post_scope"]:checked')?.value === 'specific';
+  config.source = isSpecific ? 'POST COMMENT → DM' : 'COMMENT → DM';
+  const rawKey = form.elements.namedItem('keywords')?.value.split(',')[0].trim().toUpperCase() || '';
+  if (matchType === 'any') {
+    config.keyword = 'ANY COMMENT';
+  } else if (matchType === 'exact') {
+    config.keyword = 'EXACT: ' + (rawKey || 'WORD');
+  } else {
+    config.keyword = rawKey || 'KEYWORD';
+  }
   config.active = form.elements.namedItem('active').checked;
   config.publicReply = form.elements.namedItem('public_reply_text').value;
   config.text = form.elements.namedItem('reply_text').value;
@@ -292,6 +558,297 @@ document.querySelectorAll('.rule-card').forEach(card => {
   card.addEventListener('focusin', () => { if (card.open) previewRule(card); });
   card.addEventListener('input', () => previewRule(card));
 });
+function initAutomationForms(root) {
+  root.querySelectorAll('form').forEach(form => {
+    const postScopeRadios = form.querySelectorAll('input[name="post_scope"]');
+    const specificBox = form.querySelector('.specific-post-box');
+    const updateScope = () => {
+      const isSpecific = form.querySelector('input[name="post_scope"]:checked')?.value === 'specific';
+      if (specificBox) specificBox.hidden = !isSpecific;
+    };
+    postScopeRadios.forEach(radio => radio.addEventListener('change', updateScope));
+
+    const matchTypeRadios = form.querySelectorAll('input[name="match_type"]');
+    const keywordsField = form.querySelector('.keywords-field');
+    const keywordsInput = keywordsField?.querySelector('input[name="keywords"]');
+    const updateMatch = () => {
+      const matchType = form.querySelector('input[name="match_type"]:checked')?.value || 'contains';
+      if (keywordsField) {
+        keywordsField.hidden = matchType === 'any';
+        if (keywordsInput) keywordsInput.required = matchType !== 'any';
+      }
+    };
+    matchTypeRadios.forEach(radio => radio.addEventListener('change', updateMatch));
+
+    const browseBtn = form.querySelector('[data-load-posts]');
+    const statusEl = form.querySelector('.recent-posts-status');
+    const postIdInput = form.querySelector('input[name="post_id"]');
+    const postUrlInput = form.querySelector('input[name="post_url"]');
+    let cachedMedia = null;
+    if (browseBtn) {
+      browseBtn.addEventListener('click', async () => {
+        let gallery = form.querySelector('.post-gallery-modal');
+        if (gallery) {
+          gallery.remove();
+          if (statusEl) statusEl.textContent = '';
+          return;
+        }
+
+        browseBtn.disabled = true;
+        if (statusEl) statusEl.textContent = 'Loading posts…';
+        try {
+          if (!cachedMedia) {
+            const res = await fetch('/admin/media');
+            const data = await res.json();
+            if (data.ok && Array.isArray(data.media)) {
+              cachedMedia = data.media;
+            } else {
+              cachedMedia = [];
+            }
+          }
+
+          if (cachedMedia && cachedMedia.length > 0) {
+            if (statusEl) statusEl.textContent = cachedMedia.length + ' posts available. Click a post to select:';
+            gallery = document.createElement('div');
+            gallery.className = 'post-gallery-modal';
+
+            const currentId = (postIdInput?.value || '').trim();
+
+            const header = document.createElement('div');
+            header.className = 'post-gallery-header';
+            header.innerHTML = '<input type="search" placeholder="Filter ' + cachedMedia.length + ' posts by name or ID…" class="post-gallery-search" aria-label="Filter posts">' +
+              '<span class="post-gallery-count">' + cachedMedia.length + ' posts</span>' +
+              '<button type="button" class="post-gallery-close" title="Close post list" aria-label="Close">✕</button>';
+
+            const scrollList = document.createElement('div');
+            scrollList.className = 'post-gallery-scroll';
+
+            cachedMedia.forEach((m, idx) => {
+              const num = idx + 1;
+              const isSelected = currentId && (currentId === m.id || (m.permalink && currentId.includes(m.id)));
+              const card = document.createElement('div');
+              card.className = 'post-card-item' + (isSelected ? ' is-selected' : '');
+              card.dataset.id = m.id;
+              card.dataset.search = ((m.caption || '') + ' ' + m.id + ' ' + (m.mediaType || '')).toLowerCase();
+
+              const safeCaption = m.caption ? m.caption.replace(/</g, '&lt;').replace(/>/g, '&gt;') : ('Instagram Post #' + num);
+              const typeIcon = m.mediaType === 'VIDEO' ? '🎬' : m.mediaType === 'CAROUSEL_ALBUM' ? '🎠' : '📷';
+              const typeLabel = m.mediaType === 'VIDEO' ? 'REEL' : m.mediaType === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST';
+
+              let thumbHtml = '';
+              if (m.thumbnailUrl) {
+                thumbHtml = '<img src="' + m.thumbnailUrl + '" alt="Post #' + num + '" class="post-card-thumb-img" loading="lazy">' +
+                  '<div class="post-card-thumb-fallback" style="display:none">' + typeIcon + '<span>#' + num + '</span></div>';
+              } else {
+                thumbHtml = '<div class="post-card-thumb-fallback">' + typeIcon + '<span>#' + num + '</span></div>';
+              }
+
+              card.innerHTML = '<span class="post-num-badge">#' + num + '</span>' +
+                '<div class="post-card-thumb-box">' + thumbHtml + '</div>' +
+                '<div class="post-card-content">' +
+                  '<div class="post-card-name" title="' + safeCaption + '">' + safeCaption + '</div>' +
+                  '<div class="post-card-meta">' +
+                    '<span class="post-type-tag">' + typeIcon + ' ' + typeLabel + '</span>' +
+                    '<span class="post-card-id">ID: ' + m.id + '</span>' +
+                    (m.permalink ? '<a href="' + m.permalink + '" target="_blank" rel="noopener noreferrer" class="post-card-ig-link" onclick="event.stopPropagation()">View on IG ↗</a>' : '') +
+                  '</div>' +
+                '</div>' +
+                '<span class="post-select-cta">' + (isSelected ? '✓ Selected' : 'Select') + '</span>';
+
+              const thumbImg = card.querySelector('.post-card-thumb-img');
+              if (thumbImg) {
+                thumbImg.addEventListener('error', () => {
+                  thumbImg.style.display = 'none';
+                  const fb = card.querySelector('.post-card-thumb-fallback');
+                  if (fb) fb.style.display = 'flex';
+                });
+              }
+
+              card.addEventListener('click', () => {
+                scrollList.querySelectorAll('.post-card-item').forEach(el => {
+                  el.classList.remove('is-selected');
+                  const cta = el.querySelector('.post-select-cta');
+                  if (cta) cta.textContent = 'Select';
+                });
+                card.classList.add('is-selected');
+                const cta = card.querySelector('.post-select-cta');
+                if (cta) cta.textContent = '✓ Selected';
+
+                if (postIdInput) postIdInput.value = m.id;
+                if (postUrlInput && m.permalink) postUrlInput.value = m.permalink;
+                if (statusEl) statusEl.textContent = '✓ Selected Post #' + num + ' (' + m.id + ')';
+
+                let selBadge = form.querySelector('.selected-post-preview-pill');
+                if (!selBadge && postIdInput) {
+                  selBadge = document.createElement('div');
+                  selBadge.className = 'selected-post-preview-pill';
+                  postIdInput.parentNode.appendChild(selBadge);
+                }
+                if (selBadge) {
+                  selBadge.innerHTML = '<span><strong>Post #' + num + ':</strong> ' + (m.caption || m.id).slice(0, 40) + '…</span>';
+                }
+
+                const ruleCard = form.closest('.rule-card');
+                if (ruleCard) previewRule(ruleCard);
+              });
+
+              scrollList.appendChild(card);
+            });
+
+            gallery.appendChild(header);
+            gallery.appendChild(scrollList);
+
+            const pickerBar = browseBtn.closest('.post-picker-bar');
+            if (pickerBar) {
+              pickerBar.insertAdjacentElement('afterend', gallery);
+            } else {
+              browseBtn.parentNode.insertAdjacentElement('afterend', gallery);
+            }
+
+            const searchInput = header.querySelector('.post-gallery-search');
+            searchInput.addEventListener('input', () => {
+              const q = searchInput.value.toLowerCase().trim();
+              let visibleCount = 0;
+              scrollList.querySelectorAll('.post-card-item').forEach(item => {
+                const text = item.dataset.search || '';
+                const match = !q || text.includes(q);
+                item.hidden = !match;
+                if (match) visibleCount++;
+              });
+              const countEl = header.querySelector('.post-gallery-count');
+              if (countEl) countEl.textContent = visibleCount + ' posts';
+            });
+
+            header.querySelector('.post-gallery-close').addEventListener('click', () => {
+              gallery.remove();
+              if (statusEl) statusEl.textContent = '';
+            });
+
+          } else {
+            if (statusEl) statusEl.textContent = 'No posts returned from Meta. You can enter Post URL or Media ID manually.';
+          }
+        } catch (err) {
+          console.error(err);
+          if (statusEl) statusEl.textContent = 'Could not load posts. You can enter Post URL or Media ID manually.';
+        } finally {
+          browseBtn.disabled = false;
+        }
+      });
+    }
+  });
+}
+initAutomationForms(document);
+function compressToWebP(file, maxWidth = 1000, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (w > maxWidth || h > maxWidth) {
+          if (w > h) { h = Math.round((h * maxWidth) / w); w = maxWidth; }
+          else { w = Math.round((w * maxWidth) / h); h = maxWidth; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/webp', quality);
+        resolve({ dataUrl, filename: (file.name || 'image').replace(/\.[^.]+$/, '') + '.webp' });
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function initMediaUploads(root) {
+  root.querySelectorAll('.dm-image-file-input').forEach(input => {
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const box = input.closest('.image-attachment-box');
+      if (!box) return;
+      const assetIdInput = box.querySelector('input[name="image_asset_id"]');
+      const previewWrapper = box.querySelector('.image-preview-wrapper');
+      const thumb = box.querySelector('.dm-image-thumb');
+      try {
+        input.disabled = true;
+        const compressed = await compressToWebP(file);
+        const res = await fetch('/admin/assets', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ filename: compressed.filename, data_base64: compressed.dataUrl, mime_type: 'image/webp' })
+        });
+        const data = await res.json();
+        if (data.ok && data.id) {
+          if (assetIdInput) assetIdInput.value = data.id;
+          if (thumb) thumb.src = data.url;
+          if (previewWrapper) previewWrapper.hidden = false;
+          input.hidden = true;
+        } else {
+          alert(data.error || 'Failed to upload image.');
+        }
+      } catch (err) {
+        alert('Image processing error: ' + (err.message || err));
+      } finally {
+        input.disabled = false;
+        input.value = '';
+      }
+    });
+  });
+
+  root.querySelectorAll('[data-remove-image]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const box = btn.closest('.image-attachment-box');
+      if (!box) return;
+      const assetIdInput = box.querySelector('input[name="image_asset_id"]');
+      const previewWrapper = box.querySelector('.image-preview-wrapper');
+      const fileInput = box.querySelector('.dm-image-file-input');
+      if (assetIdInput) assetIdInput.value = '';
+      if (previewWrapper) previewWrapper.hidden = true;
+      if (fileInput) fileInput.hidden = false;
+    });
+  });
+
+  const avatarInput = root.querySelector('.bridge-avatar-input');
+  if (avatarInput) {
+    avatarInput.addEventListener('change', async () => {
+      const file = avatarInput.files?.[0];
+      if (!file) return;
+      const box = avatarInput.closest('.avatar-upload-box');
+      if (!box) return;
+      const assetIdInput = box.querySelector('input[name="profile_pic_asset_id"]');
+      const dataInput = box.querySelector('input[name="profile_pic_data"]');
+      const previewCircle = box.querySelector('.avatar-preview-circle');
+      try {
+        avatarInput.disabled = true;
+        const compressed = await compressToWebP(file, 600, 0.88);
+        const res = await fetch('/admin/assets', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ filename: 'profile_' + compressed.filename, data_base64: compressed.dataUrl, mime_type: 'image/webp' })
+        });
+        const data = await res.json();
+        if (data.ok && data.id) {
+          if (assetIdInput) assetIdInput.value = data.id;
+          if (dataInput) dataInput.value = compressed.dataUrl;
+          if (previewCircle) {
+            previewCircle.innerHTML = '<img src="' + data.url + '" class="bridge-avatar-preview" alt="Profile avatar">';
+          }
+        } else {
+          alert(data.error || 'Failed to upload avatar.');
+        }
+      } catch (err) {
+        alert('Avatar upload error: ' + (err.message || err));
+      } finally {
+        avatarInput.disabled = false;
+      }
+    });
+  }
+}
+initMediaUploads(document);
 const tabs = [...document.querySelectorAll('[data-tab]')];
 function selectTab(tab) { tabs.forEach(item => { const active = item === tab; item.setAttribute('aria-selected', String(active)); item.tabIndex = active ? 0 : -1; document.getElementById(item.dataset.tab).hidden = !active; }); }
 tabs.forEach((tab, index) => { tab.addEventListener('click', () => selectTab(tab)); tab.addEventListener('keydown', event => { if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); selectTab(tabs[next]); } }); });
@@ -301,6 +858,21 @@ document.querySelectorAll('form').forEach(form => form.addEventListener('submit'
 `;
 
 const styles = `
+.checkbox-opt{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:500;color:#354d3e;cursor:pointer;margin:6px 0}
+.checkbox-opt input{accent-color:#3e674b}
+.image-attachment-box{background:#f9faf6;border:1px solid #e1e7da;border-radius:9px;padding:12px;margin:10px 0}
+.image-preview-wrapper{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.dm-image-thumb{width:68px;height:68px;object-fit:cover;border-radius:8px;border:1px solid #c8d4bf;background:#fff}
+.dm-image-file-input{font-size:11px;width:100%}
+.bridge-panel{margin-top:26px}
+.bridge-top-grid{display:grid;grid-template-columns:220px 1fr;gap:24px;margin-bottom:16px}
+@media(max-width:820px){.bridge-top-grid{grid-template-columns:1fr}}
+.avatar-upload-box{display:flex;flex-direction:column;align-items:center;text-align:center;padding:16px;background:#f9faf6;border:1px solid #e1e7da;border-radius:12px}
+.avatar-preview-circle{width:90px;height:90px;border-radius:50%;overflow:hidden;border:3px solid #3e674b;background:#e9dfcc;margin:10px 0 12px;display:flex;align-items:center;justify-content:center}
+.bridge-avatar-preview{width:100%;height:100%;object-fit:cover}
+.avatar-placeholder{font-size:26px;font-weight:700;color:#5a685c}
+.bridge-avatar-input{font-size:11px;width:100%;margin-bottom:6px}
+.bridge-fields-column{display:flex;flex-direction:column;gap:12px}
 .connection-panel{margin-top:26px}
 .connection-panel>p{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:14px}
 .connection-dates{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:18px;margin:22px 0}
@@ -308,6 +880,56 @@ const styles = `
 .connection-dates dd{margin:0;font-size:12px}
 .connection-panel .form-actions form{margin:0}
 .button:disabled{cursor:default;opacity:.55}
+.badge.blue{background:#e7f0fa;color:#24588a}
+.badge.purple{background:#f3e8ff;color:#6b21a8}
+.field-label-text{font-size:11px;font-weight:600;display:block;margin-bottom:6px;color:#3d4f40}
+.segmented-control{display:inline-flex;background:#ebf0e4;border-radius:8px;padding:3px;gap:3px;border:1px solid #dce4d2}
+.segmented-control label{font-size:11px;cursor:pointer;margin:0}
+.segmented-control input{position:absolute;opacity:0;pointer-events:none}
+.segmented-control span{display:block;padding:5px 12px;border-radius:6px;font-weight:500;color:#5a685c;transition:background .15s,color .15s}
+.segmented-control input:checked+span{background:#fff;color:#233b32;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.specific-post-box{background:#f9faf6;border:1px solid #e1e7da;border-radius:9px;padding:12px;margin:10px 0}
+.post-picker-bar{display:flex;align-items:center;gap:12px;margin-top:8px}
+.small-btn{padding:5px 10px;font-size:10px;min-height:30px}
+.trigger-mode-box{margin:12px 0}
+.trigger-options{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+@media(max-width:760px){.trigger-options{grid-template-columns:1fr}}
+.trigger-opt{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border:1px solid #dde3d5;border-radius:8px;cursor:pointer;background:#fff;transition:border-color .15s,background .15s}
+.trigger-opt:hover{border-color:#aac18c;background:#fbfcf9}
+.trigger-opt input{margin-top:3px;accent-color:#3e674b}
+.trigger-opt div strong{display:block;font-size:11px;font-weight:600;color:#29372f}
+.trigger-opt div span{display:block;font-size:9px;color:var(--muted);margin-top:2px;line-height:1.3}
+.trigger-opt:has(input:checked){border-color:#3e674b;background:#f3f7ee}
+.event-post-id{display:inline-flex;align-items:center;gap:3px;color:#24588a;font-size:9px;background:#e7f0fa;padding:1px 5px;border-radius:4px}
+.event-post-id .icon{width:11px;height:11px}
+.post-gallery-modal{margin-top:10px;background:#ffffff;border:1px solid #dce4d2;border-radius:12px;padding:12px;box-shadow:0 4px 18px rgba(0,0,0,.07)}
+.post-gallery-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #edf2e8}
+.post-gallery-search{flex:1;font-size:11px;padding:7px 10px;border:1px solid #d5ded0;border-radius:7px;background:#fcfdfa}
+.post-gallery-count{font-size:11px;font-weight:600;color:#556858;white-space:nowrap}
+.post-gallery-close{background:none;border:0;color:#78867a;font-size:14px;cursor:pointer;padding:4px 8px;border-radius:5px}
+.post-gallery-close:hover{background:#f1f5eb;color:#233b32}
+.post-gallery-scroll{max-height:290px;overflow-y:auto;display:flex;flex-direction:column;gap:7px;padding-right:4px}
+.post-gallery-scroll::-webkit-scrollbar{width:6px}
+.post-gallery-scroll::-webkit-scrollbar-track{background:#f1f4ed;border-radius:4px}
+.post-gallery-scroll::-webkit-scrollbar-thumb{background:#c3cfbe;border-radius:4px}
+.post-gallery-scroll::-webkit-scrollbar-thumb:hover{background:#9fae99}
+.post-card-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:#f9faf6;border:1px solid #e2e8db;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}
+.post-card-item:hover{background:#f2f7ec;border-color:#8eaa60;transform:translateY(-1px)}
+.post-card-item.is-selected{background:#ebf5df;border-color:#3e674b;box-shadow:0 0 0 2px rgba(62,103,75,.2)}
+.post-num-badge{font-size:11px;font-weight:700;color:#284333;background:#dcebaf;padding:3px 7px;border-radius:6px;min-width:32px;text-align:center;flex-shrink:0}
+.post-card-thumb-box{width:54px;height:54px;border-radius:8px;overflow:hidden;background:#e5ece0;flex-shrink:0;display:flex;align-items:center;justify-content:center;border:1px solid #d5ded0}
+.post-card-thumb-img{width:100%;height:100%;object-fit:cover;display:block}
+.post-card-thumb-fallback{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#5d6f5f;background:linear-gradient(135deg,#e4eee0 0%,#d5e5cf 100%);gap:2px}
+.post-card-content{flex:1;min-width:0}
+.post-card-name{font-size:12px;font-weight:600;color:#24382c;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+.post-card-meta{display:flex;align-items:center;gap:8px;font-size:10px;color:#6c7b6f;flex-wrap:wrap}
+.post-type-tag{font-size:9px;font-weight:600;padding:1px 5px;border-radius:4px;background:#e3ebdc;color:#38513e}
+.post-card-id{font-family:monospace;font-size:9.5px;color:#556758}
+.post-card-ig-link{font-size:9.5px;color:#335b40;text-decoration:underline}
+.post-card-ig-link:hover{color:#1e3726}
+.post-select-cta{font-size:10px;font-weight:600;padding:5px 9px;border-radius:6px;background:#e8efe2;color:#2d4734;flex-shrink:0;border:1px solid #d0deca;transition:all .15s}
+.post-card-item:hover .post-select-cta,.post-card-item.is-selected .post-select-cta{background:#3e674b;color:#fff;border-color:#3e674b}
+.selected-post-preview-pill{display:inline-flex;align-items:center;gap:6px;background:#ebf5df;border:1px solid #b7cfa6;border-radius:7px;padding:4px 9px;font-size:10.5px;color:#2b4933;margin-top:6px}
 :root{--bg:#f6f7f3;--panel:#fff;--ink:#233b32;--text:#29372f;--muted:#768078;--line:#e4e8df;--green:#3e674b;--lime:#dcebaf;--soft:#f1f5eb;--amber:#93682b;--radius:14px;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);font-size:14px;line-height:1.5;color-scheme:light}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth;scroll-padding-top:28px}
